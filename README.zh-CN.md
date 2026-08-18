@@ -21,9 +21,15 @@ AppleScript 通知器 + 一个 launchd 任务，所有东西都在 `~/.eye-break
 |---|---|
 | 正常使用（空闲 < 90 秒） | 正常累加 |
 | 短暂发呆（90 秒 ~ 5 分钟） | **暂停累加** —— 你可能只是在读屏幕 |
-| 锁屏 / 离开超过 5 分钟 | **清零** —— 这本身就是一次休息 |
+| 锁屏超过 60 秒 | **清零** —— 这本身就是一次休息 |
+| 锁屏不到 60 秒 | **暂停累加**，进度保留 |
+| 没锁屏但离开超过 5 分钟 | **清零** |
 | 合盖睡眠后唤醒 | **清零** —— 不会一坐下就被提醒 |
 | 攒够了但不在活跃时段 | 跳过并记日志，下一轮从头开始 |
+
+锁屏状态直接读 IORegistry 里的 `IOConsoleLocked`，**不是**用空闲时间推断的。
+这一点很关键：锁屏期间 `HIDIdleTime` 会被锁屏界面自己不断重置，你人不在的整段
+时间里它都贴着 0，所以任何基于空闲时间的判断都会以为你从没离开过。
 
 ## 安装
 
@@ -54,7 +60,8 @@ cd eye-break
 | `LANG_PREF` | `auto` | `auto` / `zh` / `en`，`auto` 跟随系统语言 |
 | `ACTIVE_START` / `ACTIVE_END` | `9` / `23` | 只在这个时段提醒 |
 | `INTERVAL` | `1200` | 攒够多少秒用眼时间提醒一次 |
-| `BREAK_RESET` | `300` | 离开超过这么久就清零 |
+| `BREAK_RESET` | `300` | 没锁屏但离开超过这么久就清零 |
+| `LOCK_RESET` | `60` | 锁屏超过这么久就清零 |
 | `IDLE_PAUSE` | `90` | 空闲超过这么久就暂停累加 |
 | `BREAK_SECONDS` | `20` | 远眺时长 |
 | `START_SOUND` / `END_SOUND` | `Glass` / `Ping` | `/System/Library/Sounds` 里的任意名字 |
@@ -67,6 +74,11 @@ cd eye-break
 ```
 launchd（每 60 秒） -> eye-break.sh -> 从 ioreg 读 HIDIdleTime
                             |
+                            +   以及 ioreg 的 IOConsoleLocked
+                            |
+                            +-- tick 间隔 >= 300 秒 .. 睡过了：清零，退出
+                            +-- 锁屏中 .............. 累加锁屏时长；
+                            |                         >= 60 秒 -> 清零，退出
                             +-- 空闲 >= 300 秒 ...... 清零，退出
                             +-- 空闲 >= 90 秒 ....... 暂停，退出
                             +-- 否则 ................ 累加这段间隔
@@ -75,7 +87,8 @@ launchd（每 60 秒） -> eye-break.sh -> 从 ioreg 读 HIDIdleTime
                                                       再提醒，然后清零
 ```
 
-状态就是 `~/.eye-break/state` 里的两个整数：累计秒数、上次 tick 的时间戳。
+状态就是 `~/.eye-break/state` 里的三个整数：累计用眼秒数、上次 tick 的时间戳、
+已锁屏秒数。
 判断机器睡没睡过，靠的是 tick 间隔是否超过 `BREAK_RESET`，不需要额外机制。
 
 通知由 `EyeBreak.app` 投递，安装时用 `osacompile` 现编。shell 把
@@ -89,7 +102,8 @@ launchd（每 60 秒） -> eye-break.sh -> 从 ioreg 读 HIDIdleTime
 - 改 applet 的 `Info.plist` 会让代码签名失效，App 会静默拒绝启动。`install.sh`
   改完会重新 ad-hoc 签名。
 - 专注模式 / 勿扰会拦掉通知。这通常正是你想要的 —— 开会时它会自动闭嘴。
-- 测试钩子：`EYE_BREAK_FAKE_IDLE`、`EYE_BREAK_LOG`、`EYE_BREAK_STATE`，可以在不碰
+- 测试钩子：`EYE_BREAK_FAKE_LOCKED`、`EYE_BREAK_FAKE_IDLE`、`EYE_BREAK_LOG`、
+  `EYE_BREAK_STATE`，可以在不碰
   真实数据、不等 20 分钟的前提下把状态机跑一遍。
 
 ## 卸载

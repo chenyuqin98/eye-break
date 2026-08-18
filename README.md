@@ -22,9 +22,16 @@ after one minute of screen time — then keeps drifting out of phase all day.
 |---|---|
 | Actively working (idle < 90 s) | timer accumulates |
 | Brief pause (90 s – 5 min) | timer **pauses** — you're probably still reading |
-| Screen locked / away > 5 min | timer **resets** — that already was an eye break |
+| Screen locked > 60 s | timer **resets** — that already was an eye break |
+| Screen locked < 60 s | timer **pauses**, progress kept |
+| Away from keyboard > 5 min (unlocked) | timer **resets** |
 | Lid closed, machine slept | timer **resets** — no ambush reminder on wake |
 | Quota reached outside active hours | skipped, logged, next round starts clean |
+
+Lock state is read from `IOConsoleLocked` in the IORegistry, **not** inferred from
+idle time. This matters: while the screen is locked, `HIDIdleTime` keeps getting
+reset by the lock screen itself and sits near zero the entire time you are away,
+so any idle-based heuristic silently believes you never left.
 
 ## Install
 
@@ -56,7 +63,8 @@ Edit `~/.eye-break/config` — changes take effect on the next tick, no reload n
 | `LANG_PREF` | `auto` | `auto` / `zh` / `en`. `auto` follows your macOS locale |
 | `ACTIVE_START` / `ACTIVE_END` | `9` / `23` | only remind between these hours |
 | `INTERVAL` | `1200` | seconds of screen time per round |
-| `BREAK_RESET` | `300` | away this long → reset the timer |
+| `BREAK_RESET` | `300` | away from keyboard this long → reset the timer |
+| `LOCK_RESET` | `60` | screen locked this long → reset the timer |
 | `IDLE_PAUSE` | `90` | idle this long → pause accumulating |
 | `BREAK_SECONDS` | `20` | how long to look away |
 | `START_SOUND` / `END_SOUND` | `Glass` / `Ping` | any name from `/System/Library/Sounds` |
@@ -70,6 +78,11 @@ lines, in both languages. Add your own by appending to the arrays at the top of
 ```
 launchd (every 60s)  ->  eye-break.sh  ->  reads HIDIdleTime from ioreg
                               |
+                              +   and IOConsoleLocked from ioreg
+                              |
+                              +-- tick gap >= 300s .... slept: reset, exit
+                              +-- locked .............. add to locked time;
+                              |                         >= 60s -> reset, exit
                               +-- idle >= 300s ........ reset state, exit
                               +-- idle >= 90s ......... pause, exit
                               +-- otherwise ........... accumulate elapsed
@@ -78,8 +91,8 @@ launchd (every 60s)  ->  eye-break.sh  ->  reads HIDIdleTime from ioreg
                                                            notify, reset state
 ```
 
-State is two integers in `~/.eye-break/state`: accumulated seconds, and the
-timestamp of the last tick. A tick gap larger than `BREAK_RESET` is how sleep/wake
+State is three integers in `~/.eye-break/state`: accumulated screen seconds, the
+timestamp of the last tick, and how long the screen has been locked. A tick gap larger than `BREAK_RESET` is how sleep/wake
 is detected — no extra plumbing needed.
 
 Notifications are delivered by `EyeBreak.app`, built at install time by
@@ -95,7 +108,8 @@ then `open -n`s the app, which reads the file and posts the notification.
   silently refuse to launch. `install.sh` re-signs ad-hoc afterwards.
 - Do Not Disturb / Focus will suppress the notification. That's usually what you
   want — it means no reminders mid-meeting.
-- Testing hooks: `EYE_BREAK_FAKE_IDLE`, `EYE_BREAK_LOG`, `EYE_BREAK_STATE` let you
+- Testing hooks: `EYE_BREAK_FAKE_LOCKED`, `EYE_BREAK_FAKE_IDLE`, `EYE_BREAK_LOG`,
+  `EYE_BREAK_STATE` let you
   drive the state machine without touching real data or waiting 20 minutes.
 
 ## Uninstall

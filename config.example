@@ -16,6 +16,12 @@ INTERVAL=1200
 # 离开超过这么久就清零：这本身就是一次天然的休息
 BREAK_RESET=300
 
+# Screen locked this long and the timer resets. Shorter than BREAK_RESET
+# because locking is an explicit "I'm leaving" signal, not a guess.
+# 锁屏超过这么久就清零。比 BREAK_RESET 短，因为锁屏是明确的「我走了」信号，
+# 不像空闲时间那样靠猜。
+LOCK_RESET=60
+
 # Idle this long and the timer pauses (but does not reset)
 # 空闲超过这么久就暂停累加，但不清零 —— 你可能只是在读屏幕
 IDLE_PAUSE=90

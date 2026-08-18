@@ -23,6 +23,7 @@ ACTIVE_START=9        # only remind after 09:00        · 只在 09:00 之后提
 ACTIVE_END=23         # only remind before 23:00       · 只在 23:00 之前提醒
 INTERVAL=1200         # screen-time seconds per round  · 攒够多少秒用眼时间提醒一次
 BREAK_RESET=300       # away this long => reset timer  · 离开这么久就清零重来
+LOCK_RESET=60         # locked this long => reset timer · 锁屏这么久就清零重来
 IDLE_PAUSE=90         # idle this long => stop adding  · 空闲这么久就暂停累加（不清零）
 BREAK_SECONDS=20      # how long to look away          · 远眺时长
 START_SOUND="Glass"
@@ -143,27 +144,40 @@ case "${1:-}" in
   --now)     fire;  exit 0 ;;
 esac
 
-# ─── Read state · 读状态 ────────────────────────────────────────────────
+# ─── Read state · 读状态 ────────────────────────────────────────────
+# state file: "<accumulated screen seconds> <last tick epoch> <locked seconds>"
+# 状态文件三个整数：累计用眼秒数、上次 tick 时间戳、已锁屏秒数
 now=$(date +%s)
-accum=0; last=$now
-if [ -f "$STATE" ]; then read -r accum last < "$STATE" 2>/dev/null; fi
-accum=${accum:-0}; last=${last:-$now}
+accum=0; last=$now; away=0
+if [ -f "$STATE" ]; then read -r accum last away < "$STATE" 2>/dev/null; fi
+accum=${accum:-0}; last=${last:-$now}; away=${away:-0}
 
 if [ "${1:-}" = "--status" ]; then
   left=$((INTERVAL - accum)); [ "$left" -lt 0 ] && left=0
   if [ "$LANG_PREF" = "zh" ]; then
     printf '已累计用眼 %d 分 %d 秒 / %d 分，还差 %d 分 %d 秒\n' \
       $((accum/60)) $((accum%60)) $((INTERVAL/60)) $((left/60)) $((left%60))
+    [ "$away" -gt 0 ] && printf '当前锁屏中，已锁 %d 分 %d 秒\n' $((away/60)) $((away%60))
   else
     printf 'Screen time this round: %dm %ds / %dm  —  %dm %ds to go\n' \
       $((accum/60)) $((accum%60)) $((INTERVAL/60)) $((left/60)) $((left%60))
+    [ "$away" -gt 0 ] && printf 'Screen is locked, %dm %ds so far\n' $((away/60)) $((away%60))
   fi
   exit 0
 fi
 
 # ─── One tick · 每分钟一次 ──────────────────────────────────────────────
-# Idle time in seconds. Locking the screen, display sleep and walking away
-# all make this grow. 键鼠空闲秒数：锁屏、屏幕休眠、离开工位都会让它变大。
+# Is the screen locked? This is the authoritative signal — idle time is NOT,
+# because the lock screen keeps generating HID events and HIDIdleTime stays
+# near zero the whole time you are away.
+# 锁屏状态才是权威信号。空闲时间靠不住：锁屏界面本身会产生 HID 事件，
+# 你人不在的整段时间里 HIDIdleTime 都贴着 0。
+locked=${EYE_BREAK_FAKE_LOCKED:-$(/usr/sbin/ioreg -n Root -d1 -k IOConsoleLocked 2>/dev/null \
+        | /usr/bin/awk -F'= ' '/"IOConsoleLocked"/{gsub(/[^A-Za-z]/,"",$2); print tolower($2); exit}')}
+case "$locked" in yes|1|true) locked=1 ;; *) locked=0 ;; esac
+
+# Keyboard/mouse idle seconds — still useful for "sitting there but not typing".
+# 键鼠空闲秒数 —— 仍然有用，用来判断「人在但没动」。
 idle=${EYE_BREAK_FAKE_IDLE:-$(/usr/sbin/ioreg -c IOHIDSystem 2>/dev/null \
        | /usr/bin/awk '/HIDIdleTime/ {print int($NF/1000000000); exit}')}
 idle=${idle:-0}
@@ -171,25 +185,48 @@ idle=${idle:-0}
 elapsed=$((now - last))
 [ "$elapsed" -lt 0 ] && elapsed=0
 
-# Away long enough (or the machine slept) => that WAS the eye break. Reset.
-# 离开够久（或机器睡过）=> 眼睛已天然休息，清零。
-if [ "$idle" -ge "$BREAK_RESET" ] || [ "$elapsed" -ge "$BREAK_RESET" ]; then
-  [ "$accum" -gt 0 ] && log "reset: away ${idle}s (tick gap ${elapsed}s) — timer cleared"
-  printf '0 %s\n' "$now" > "$STATE"
+# A long gap between ticks means the machine slept. That was a real break.
+# tick 间隔过大 = 机器睡过，这本身就是一次休息。
+if [ "$elapsed" -ge "$BREAK_RESET" ]; then
+  [ "$accum" -gt 0 ] && log "reset: tick gap ${elapsed}s (machine slept) — timer cleared"
+  printf '0 %s 0\n' "$now" > "$STATE"
   exit 0
 fi
 
-# A short pause still counts as screen time (you're probably reading).
+if [ "$locked" = "1" ]; then
+  away=$((away + elapsed))
+  if [ "$away" -ge "$LOCK_RESET" ] && [ "$accum" -gt 0 ]; then
+    log "reset: screen locked ${away}s — timer cleared"
+    accum=0
+  fi
+  printf '%s %s %s\n' "$accum" "$now" "$away" > "$STATE"
+  exit 0
+fi
+
+# Just came back from the lock screen · 刚从锁屏回来
+if [ "$away" -gt 0 ]; then
+  log "resume: unlocked after ${away}s (screen time kept: ${accum}s)"
+  away=0
+fi
+
+# Away from the keyboard without locking · 没锁屏但长时间没碰
+if [ "$idle" -ge "$BREAK_RESET" ]; then
+  [ "$accum" -gt 0 ] && log "reset: idle ${idle}s — timer cleared"
+  printf '0 %s 0\n' "$now" > "$STATE"
+  exit 0
+fi
+
+# A short pause still counts as screen time (you are probably reading).
 # 短暂发呆仍算在看屏幕；超过 IDLE_PAUSE 就暂停累加，但不清零。
 [ "$idle" -lt "$IDLE_PAUSE" ] && accum=$((accum + elapsed))
 
 if [ "$accum" -ge "$INTERVAL" ]; then
-  printf '0 %s\n' "$now" > "$STATE"
+  printf '0 %s 0\n' "$now" > "$STATE"
   hour=$(date +%-H)
   if [ "$hour" -lt "$ACTIVE_START" ] || [ "$hour" -ge "$ACTIVE_END" ]; then
     log "skip: quota reached but outside active hours (${hour}h)"; exit 0
   fi
   fire
 else
-  printf '%s %s\n' "$accum" "$now" > "$STATE"
+  printf '%s %s %s\n' "$accum" "$now" "$away" > "$STATE"
 fi
