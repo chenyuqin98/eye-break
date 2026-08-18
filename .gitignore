@@ -1,0 +1,5 @@
+.DS_Store
+EyeBreak.app/
+*.log
+state
+msg.txt

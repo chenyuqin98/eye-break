@@ -1,0 +1,28 @@
+# eye-break config · copy to ~/.eye-break/config and edit
+# 复制到 ~/.eye-break/config 后按需修改。只写你想改的行即可。
+
+# Notification language · 通知语言:  auto | zh | en
+# auto follows your macOS locale · auto 跟随系统语言
+LANG_PREF=auto
+
+# Only remind between these hours (24h) · 只在这个时段提醒
+ACTIVE_START=9
+ACTIVE_END=23
+
+# Seconds of actual screen time per round · 攒够多少秒用眼时间提醒一次
+INTERVAL=1200
+
+# Away this long and the timer resets — you already rested your eyes
+# 离开超过这么久就清零：这本身就是一次天然的休息
+BREAK_RESET=300
+
+# Idle this long and the timer pauses (but does not reset)
+# 空闲超过这么久就暂停累加，但不清零 —— 你可能只是在读屏幕
+IDLE_PAUSE=90
+
+# How long to look away · 远眺时长
+BREAK_SECONDS=20
+
+# Sounds · 音效 (any name from /System/Library/Sounds)
+START_SOUND=Glass
+END_SOUND=Ping
