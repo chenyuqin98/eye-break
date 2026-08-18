@@ -12,15 +12,26 @@ ACTIVE_END=23
 # Seconds of actual screen time per round · 攒够多少秒用眼时间提醒一次
 INTERVAL=1200
 
-# Away this long and the timer resets — you already rested your eyes
-# 离开超过这么久就清零：这本身就是一次天然的休息
-BREAK_RESET=300
+# No keyboard/mouse for this long and the timer resets. This one is a guess,
+# not a fact: idle time cannot tell "left the desk" from "reading the screen",
+# so it has to stay well above a normal reading pause or it fires constantly.
+# 这么久没碰键鼠就清零。注意这是推断而非事实：空闲时间分不清「离开工位」和
+# 「正在读屏幕」，所以必须明显高于正常的阅读停顿，否则会不停误清零。
+BREAK_RESET=120
 
-# Screen locked this long and the timer resets. Shorter than BREAK_RESET
-# because locking is an explicit "I'm leaving" signal, not a guess.
-# 锁屏超过这么久就清零。比 BREAK_RESET 短，因为锁屏是明确的「我走了」信号，
-# 不像空闲时间那样靠猜。
-LOCK_RESET=60
+# Tick gap this big means the machine slept. Keep well above the 60s tick
+# interval — below it, every normal tick looks like a sleep and the timer
+# never accumulates at all. Floored at 180 in code.
+# tick 间隔这么大 = 机器睡过。必须明显大于 60 秒的 tick 间隔，否则每个正常
+# tick 都会被误判成睡眠，永远攒不起来。代码里有 180 秒下限保护。
+SLEEP_GAP=300
+
+# Screen locked this long and the timer resets. Defaults to BREAK_SECONDS:
+# locking the screen for 20 seconds already IS the 20-second break, and unlike
+# idle time it is an explicit "I'm leaving" signal rather than a guess.
+# 锁屏超过这么久就清零。默认等于 BREAK_SECONDS：锁屏 20 秒本身就已经是那
+# 20 秒的远眺了。而且锁屏是明确的「我走了」信号，不像空闲时间那样靠猜。
+LOCK_RESET=20
 
 # Idle this long and the timer pauses (but does not reset)
 # 空闲超过这么久就暂停累加，但不清零 —— 你可能只是在读屏幕

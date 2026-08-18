@@ -22,9 +22,9 @@ after one minute of screen time — then keeps drifting out of phase all day.
 |---|---|
 | Actively working (idle < 90 s) | timer accumulates |
 | Brief pause (90 s – 5 min) | timer **pauses** — you're probably still reading |
-| Screen locked > 60 s | timer **resets** — that already was an eye break |
-| Screen locked < 60 s | timer **pauses**, progress kept |
-| Away from keyboard > 5 min (unlocked) | timer **resets** |
+| Screen locked > 20 s | timer **resets** — that already was the eye break |
+| Screen locked < 20 s | timer **pauses**, progress kept |
+| No keyboard/mouse > 2 min (unlocked) | timer **resets** |
 | Lid closed, machine slept | timer **resets** — no ambush reminder on wake |
 | Quota reached outside active hours | skipped, logged, next round starts clean |
 
@@ -63,8 +63,9 @@ Edit `~/.eye-break/config` — changes take effect on the next tick, no reload n
 | `LANG_PREF` | `auto` | `auto` / `zh` / `en`. `auto` follows your macOS locale |
 | `ACTIVE_START` / `ACTIVE_END` | `9` / `23` | only remind between these hours |
 | `INTERVAL` | `1200` | seconds of screen time per round |
-| `BREAK_RESET` | `300` | away from keyboard this long → reset the timer |
-| `LOCK_RESET` | `60` | screen locked this long → reset the timer |
+| `BREAK_RESET` | `120` | no keyboard/mouse this long → reset the timer |
+| `SLEEP_GAP` | `300` | tick gap this big → machine slept (floored at 180) |
+| `LOCK_RESET` | `20` | screen locked this long → reset the timer |
 | `IDLE_PAUSE` | `90` | idle this long → pause accumulating |
 | `BREAK_SECONDS` | `20` | how long to look away |
 | `START_SOUND` / `END_SOUND` | `Glass` / `Ping` | any name from `/System/Library/Sounds` |
@@ -80,10 +81,10 @@ launchd (every 60s)  ->  eye-break.sh  ->  reads HIDIdleTime from ioreg
                               |
                               +   and IOConsoleLocked from ioreg
                               |
-                              +-- tick gap >= 300s .... slept: reset, exit
+                              +-- tick gap >= SLEEP_GAP  slept: reset, exit
                               +-- locked .............. add to locked time;
-                              |                         >= 60s -> reset, exit
-                              +-- idle >= 300s ........ reset state, exit
+                              |                         >= 20s -> reset, exit
+                              +-- idle >= 120s ........ reset state, exit
                               +-- idle >= 90s ......... pause, exit
                               +-- otherwise ........... accumulate elapsed
                               |

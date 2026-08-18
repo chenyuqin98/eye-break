@@ -22,8 +22,12 @@ LANG_PREF=auto        # auto | zh | en
 ACTIVE_START=9        # only remind after 09:00        · 只在 09:00 之后提醒
 ACTIVE_END=23         # only remind before 23:00       · 只在 23:00 之前提醒
 INTERVAL=1200         # screen-time seconds per round  · 攒够多少秒用眼时间提醒一次
-BREAK_RESET=300       # away this long => reset timer  · 离开这么久就清零重来
-LOCK_RESET=60         # locked this long => reset timer · 锁屏这么久就清零重来
+BREAK_RESET=120       # away this long => reset timer  · 离开这么久就清零重来
+SLEEP_GAP=300         # tick gap this big => machine slept · tick 间隔这么大=机器睡过
+                      # must stay well above the 60s tick interval, or every
+                      # normal tick looks like a sleep · 必须远大于 60 秒 tick
+                      # 间隔，否则每个正常 tick 都会被误判成睡眠
+LOCK_RESET=20         # locked this long => reset timer · 锁屏这么久就清零重来
 IDLE_PAUSE=90         # idle this long => stop adding  · 空闲这么久就暂停累加（不清零）
 BREAK_SECONDS=20      # how long to look away          · 远眺时长
 START_SOUND="Glass"
@@ -186,8 +190,13 @@ elapsed=$((now - last))
 [ "$elapsed" -lt 0 ] && elapsed=0
 
 # A long gap between ticks means the machine slept. That was a real break.
-# tick 间隔过大 = 机器睡过，这本身就是一次休息。
-if [ "$elapsed" -ge "$BREAK_RESET" ]; then
+# This threshold is deliberately NOT BREAK_RESET: they measure different things,
+# and tying them together means any BREAK_RESET below the tick interval makes
+# every normal tick look like a sleep, so the timer never accumulates at all.
+# 这个阈值刻意不复用 BREAK_RESET：两者量的是不同的东西。绑在一起的话，
+# 只要 BREAK_RESET 小于 tick 间隔，每个正常 tick 都会被当成睡眠，永远攒不起来。
+[ "$SLEEP_GAP" -lt 180 ] && SLEEP_GAP=180     # floor · 下限保护
+if [ "$elapsed" -ge "$SLEEP_GAP" ]; then
   [ "$accum" -gt 0 ] && log "reset: tick gap ${elapsed}s (machine slept) — timer cleared"
   printf '0 %s 0\n' "$now" > "$STATE"
   exit 0
