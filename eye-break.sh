@@ -16,6 +16,7 @@ APP="$BASE/EyeBreak.app"
 MSG="$BASE/msg.txt"
 LOG="${EYE_BREAK_LOG:-$BASE/eye-break.log}"
 STATE="${EYE_BREAK_STATE:-$BASE/state}"
+DAILYDIR="${EYE_BREAK_DAILY:-$BASE/daily}"
 
 # ─── Defaults · 默认配置 (override in ~/.eye-break/config) ───────────────
 LANG_PREF=auto        # auto | zh | en
@@ -106,6 +107,63 @@ fi
 
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
 
+# ═══════════════════════════════════════════════════════════════════════
+#  Daily accounting · 每日计量
+#  One key=value file per day under ~/.eye-break/daily/. Rewritten every
+#  tick, so a crash costs at most one minute of data.
+#  每天一个 key=value 文件，每个 tick 重写一次，最多丢一分钟数据。
+# ═══════════════════════════════════════════════════════════════════════
+d_screen=0    # seconds counted as screen time  · 计入用眼的秒数
+d_paused=0    # at the desk but not touching it · 人在但没碰键鼠
+d_locked=0    # screen locked                   · 锁屏时长
+d_breaks=0    # reminders fired                 · 发出的提醒次数
+d_taken=0     # ...of which you went hands-off  · 其中真的停手了的
+d_rst_idle=0  # timer cleared by idle           · 因空闲清零
+d_rst_lock=0  # timer cleared by lock           · 因锁屏清零
+d_rst_sleep=0 # timer cleared by machine sleep  · 因机器睡眠清零
+d_first=0     # first active tick of the day    · 当天第一个活跃 tick
+d_last=0      # last active tick of the day     · 当天最后一个活跃 tick
+d_est=0       # 1 = the day contains reconstructed data · 该日含反推数据
+d_est_breaks=0 # reminders that came from reconstruction, so they have no
+               # "taken" measurement and must not drag the rate down
+               # 反推来的提醒次数：它们没有「照做」实测值，不能拉低遵守率
+DAYFILE=""
+
+day_load() {
+  DAYFILE="$DAILYDIR/$(date +%F)"
+  [ -f "$DAYFILE" ] && . "$DAYFILE"
+  return 0
+}
+
+# Away-from-screen time is only interesting inside the active window.
+# A machine left locked and awake overnight otherwise reports 13 hours
+# "away" on a day you sat at the desk for four.
+# 离屏时长只在活跃时段才有意义。机器通宵锁屏但没睡的话，launchd 照样
+# 每分钟 tick，一天能报出 13 小时「离屏」，而你其实只坐了四小时。
+in_active_hours() {
+  local h; h=$(date +%-H)
+  [ "$h" -ge "$ACTIVE_START" ] && [ "$h" -lt "$ACTIVE_END" ]
+}
+
+day_save() {
+  [ -n "$DAYFILE" ] || return 0
+  /bin/mkdir -p "$DAILYDIR" 2>/dev/null
+  cat > "$DAYFILE" <<EOF
+d_screen=$d_screen
+d_paused=$d_paused
+d_locked=$d_locked
+d_breaks=$d_breaks
+d_taken=$d_taken
+d_rst_idle=$d_rst_idle
+d_rst_lock=$d_rst_lock
+d_rst_sleep=$d_rst_sleep
+d_first=$d_first
+d_last=$d_last
+d_est=$d_est
+d_est_breaks=$d_est_breaks
+EOF
+}
+
 notify() { # notify <title> <body> <sound>
   if [ -d "$APP" ]; then
     printf '%s|%s|%s' "$1" "$2" "$3" > "$MSG"
@@ -117,14 +175,142 @@ notify() { # notify <title> <body> <sound>
 }
 
 fire() { # one full round: look away -> wait -> all clear
-  local entry
+  local entry idle_end
   entry="${START_MSGS[$((RANDOM % ${#START_MSGS[@]}))]}"
   notify "${entry%%|*}" "${entry#*|}" "$START_SOUND"
   log "notify: start  <${entry%%|*}>"
   sleep "$BREAK_SECONDS"
+
+  # Did you actually stop? Hands-off for the whole break is the only signal
+  # available — it is a proxy, not proof, since nothing can tell where your
+  # eyes went. Still typing through the break is unambiguous though.
+  # 你到底停没停？只能用「整段没碰键鼠」当代理指标 —— 这是推断不是事实，
+  # 没有任何 API 知道你眼睛看哪儿。但「边响边打字」是确凿的没照做。
+  idle_end=${EYE_BREAK_FAKE_IDLE:-$(/usr/sbin/ioreg -c IOHIDSystem 2>/dev/null \
+             | /usr/bin/awk '/HIDIdleTime/ {print int($NF/1000000000); exit}')}
+  idle_end=${idle_end:-0}
+  d_breaks=$((d_breaks + 1))
+  if [ "$idle_end" -ge $((BREAK_SECONDS - 5)) ]; then
+    d_taken=$((d_taken + 1))
+    log "break: hands off ${idle_end}s — counted as taken"
+  else
+    log "break: kept typing (idle ${idle_end}s) — not counted"
+  fi
+
   entry="${END_MSGS[$((RANDOM % ${#END_MSGS[@]}))]}"
   notify "${entry%%|*}" "${entry#*|}" "$END_SOUND"
   log "notify: end    <${entry%%|*}>"
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Report · 统计报表
+# ═══════════════════════════════════════════════════════════════════════
+fmt_dur() { # seconds -> "3h12m" / "47m"
+  if [ "$1" -ge 3600 ]; then printf '%dh%02dm' $(($1/3600)) $((($1%3600)/60))
+  else printf '%dm' $(($1/60)); fi
+}
+
+bar10() { # bar10 <value> <max> -> ten-cell bar
+  # Braces are mandatory: bash 3.2 is not multibyte-aware, so it swallows the
+  # following UTF-8 byte into the variable name and dies under `set -u`.
+  # 花括号不能省：bash 3.2 不认多字节，会把后面的 UTF-8 字节吃进变量名，
+  # 配上 set -u 直接报 unbound variable。
+  local n=0 i=0 out=""
+  [ "$2" -gt 0 ] && n=$(( ($1 * 10 + $2/2) / $2 ))
+  [ "$n" -gt 10 ] && n=10
+  while [ "$i" -lt "$n" ]; do out="${out}█"; i=$((i+1)); done
+  while [ "$i" -lt 10 ]; do out="${out}·"; i=$((i+1)); done
+  printf '%s' "$out"
+}
+
+stats() {
+  local days="${1:-7}" f max=0 t_screen=0 t_break=0 t_taken=0 t_rst=0 t_off=0
+  local n_days=0 any_est=0 rate off rst measured=0 t_measured=0
+  case "$days" in ''|*[!0-9]*) days=7 ;; esac
+  if [ ! -d "$DAILYDIR" ] || [ -z "$(ls "$DAILYDIR" 2>/dev/null)" ]; then
+    if [ "$LANG_PREF" = "zh" ]; then echo "还没有任何统计数据。装好之后跑满一天再回来看。"
+    else echo "No data yet. Come back after a day of ticks."; fi
+    return 0
+  fi
+  local files
+  files=$(ls "$DAILYDIR" 2>/dev/null | sort | tail -n "$days")
+
+  for f in $files; do                      # first pass: scale the bars
+    d_screen=0; . "$DAILYDIR/$f" 2>/dev/null
+    [ "$d_screen" -gt "$max" ] && max=$d_screen
+  done
+
+  # printf pads by BYTES, not display columns, so every data cell below is
+  # kept ASCII and these CJK headers are hand-spaced to match.
+  # printf 按字节而非显示宽度补空格，所以下面每个数据格都只用 ASCII，
+  # 这两行中文表头则是手工对齐的。
+  if [ "$LANG_PREF" = "zh" ]; then
+    printf '\n  20-20-20 护眼统计 · 最近 %d 天\n' "$days"
+    echo   '  ──────────────────────────────────────────────────────────────────'
+    echo   '  日期         用眼时间   离屏     提醒  照做  遵守率  中断   用眼强度'
+  else
+    printf '\n  Eye Break stats · last %d days\n' "$days"
+    echo   '  ──────────────────────────────────────────────────────────────────'
+    echo   '  Date         Screen     Away     Fired  Took  Rate    Cut    Load'
+  fi
+
+  for f in $files; do
+    d_screen=0; d_paused=0; d_locked=0; d_breaks=0; d_taken=0
+    d_rst_idle=0; d_rst_lock=0; d_rst_sleep=0; d_est=0; d_est_breaks=0
+    . "$DAILYDIR/$f" 2>/dev/null
+    off=$((d_paused + d_locked))
+    rst=$((d_rst_idle + d_rst_lock + d_rst_sleep))
+    # Only reminders we actually watched can be scored · 只有实测的提醒能算遵守率
+    measured=$((d_breaks - d_est_breaks))
+    if [ "$measured" -gt 0 ]; then rate=$(( d_taken * 100 / measured )); else rate=-1; fi
+    n_days=$((n_days + 1))
+    t_screen=$((t_screen + d_screen)); t_off=$((t_off + off))
+    t_break=$((t_break + d_breaks));   t_taken=$((t_taken + d_taken)); t_rst=$((t_rst + rst))
+    [ "$d_est" = "1" ] && any_est=1
+
+    printf '  %-11s  %-9s  %-7s  %-5s  %-4s  %-6s  %-5s  %s%s\n' \
+      "$f" "$(fmt_dur $d_screen)" "$(fmt_dur $off)" "$d_breaks" \
+      "$([ "$measured" -gt 0 ] && echo "$d_taken" || echo "-")" \
+      "$([ "$rate" -lt 0 ] && echo "-" || echo "${rate}%")" \
+      "$rst" "$(bar10 "$d_screen" "$max")" \
+      "$([ "$d_est" = "1" ] && echo " *" || echo "")"
+    t_measured=$((t_measured + measured))
+  done
+
+  echo '  ──────────────────────────────────────────────────────────────────'
+  local t_rate t_took
+  if [ "$t_measured" -gt 0 ]; then
+    t_rate="$(( t_taken * 100 / t_measured ))%"; t_took="$t_taken"
+  else
+    t_rate="-"; t_took="-"       # every day was reconstructed · 全是反推数据
+  fi
+  if [ "$LANG_PREF" = "zh" ]; then
+    printf '  合计 %2d 天   %-9s  %-7s  %-5s  %-4s  %s\n' \
+      "$n_days" "$(fmt_dur $t_screen)" "$(fmt_dur $t_off)" "$t_break" "$t_took" "$t_rate"
+    printf '  日均         %-9s  %-7s  %s 次提醒\n' \
+      "$(fmt_dur $((t_screen / (n_days>0?n_days:1))))" \
+      "$(fmt_dur $((t_off / (n_days>0?n_days:1))))" \
+      "$((t_break / (n_days>0?n_days:1)))"
+    echo
+    echo '  用眼 = 计入 20 分钟配额的时间；离屏 = 锁屏 + 长时间没碰键鼠'
+    printf '  照做 = 提醒后 %d 秒内没碰过键鼠（代理指标，系统无法知道你眼睛看哪儿）\n' \
+      $((BREAK_SECONDS - 5))
+    [ "$any_est" = "1" ] && echo '  * 该日部分数据由旧日志反推：用眼时间是下限，反推的提醒不计入遵守率'
+  else
+    printf '  %2d days      %-9s  %-7s  %-5s  %-4s  %s\n' \
+      "$n_days" "$(fmt_dur $t_screen)" "$(fmt_dur $t_off)" "$t_break" "$t_took" "$t_rate"
+    printf '  daily avg    %-9s  %-7s  %s reminders\n' \
+      "$(fmt_dur $((t_screen / (n_days>0?n_days:1))))" \
+      "$(fmt_dur $((t_off / (n_days>0?n_days:1))))" \
+      "$((t_break / (n_days>0?n_days:1)))"
+    echo
+    echo '  Screen = time counted toward the 20-minute quota; Away = locked + long idle'
+    printf '  Took = no keyboard or mouse for %ds after the nudge. A proxy — nothing sees your eyes.\n' \
+      $((BREAK_SECONDS - 5))
+    [ "$any_est" = "1" ] && echo '  * partly reconstructed from the old log: screen time is a lower bound,'
+    [ "$any_est" = "1" ] && echo '    and reconstructed reminders are excluded from the rate'
+  fi
+  echo
 }
 
 usage() {
@@ -137,6 +323,8 @@ eye-break — 20-20-20 rule reminder for macOS · 20-20-20 护眼提醒
                           立刻发一轮提醒（测试用）
   eye-break.sh --status   how much screen time has accumulated
                           看已累计多少用眼时间
+  eye-break.sh --stats [N]  daily screen time and break compliance, last N days
+                          最近 N 天的每日用眼时间与遵守情况（默认 7）
   eye-break.sh --help     this text · 本帮助
 
 Config · 配置:  ~/.eye-break/config     Log · 日志:  ~/.eye-break/eye-break.log
@@ -144,8 +332,9 @@ USAGE
 }
 
 case "${1:-}" in
-  --help|-h) usage; exit 0 ;;
-  --now)     fire;  exit 0 ;;
+  --help|-h)  usage; exit 0 ;;
+  --now)      fire;  exit 0 ;;
+  --stats)    stats "${2:-7}"; exit 0 ;;
 esac
 
 # ─── Read state · 读状态 ────────────────────────────────────────────
@@ -158,19 +347,38 @@ accum=${accum:-0}; last=${last:-$now}; away=${away:-0}
 
 if [ "${1:-}" = "--status" ]; then
   left=$((INTERVAL - accum)); [ "$left" -lt 0 ] && left=0
+  day_load
   if [ "$LANG_PREF" = "zh" ]; then
     printf '已累计用眼 %d 分 %d 秒 / %d 分，还差 %d 分 %d 秒\n' \
       $((accum/60)) $((accum%60)) $((INTERVAL/60)) $((left/60)) $((left%60))
     [ "$away" -gt 0 ] && printf '当前锁屏中，已锁 %d 分 %d 秒\n' $((away/60)) $((away%60))
+    if [ "$d_est" = "1" ]; then
+      printf '今天累计用眼约 %d 小时 %d 分，收到 %d 次提醒（含旧日志反推的估算）\n' \
+        $((d_screen/3600)) $((d_screen%3600/60)) "$d_breaks"
+    elif [ "$d_first" -gt 0 ]; then
+      printf '今天 %s 起坐到屏幕前，累计用眼 %d 小时 %d 分，收到 %d 次提醒\n' \
+        "$(date -r "$d_first" '+%H:%M')" $((d_screen/3600)) $((d_screen%3600/60)) "$d_breaks"
+    fi
   else
     printf 'Screen time this round: %dm %ds / %dm  —  %dm %ds to go\n' \
       $((accum/60)) $((accum%60)) $((INTERVAL/60)) $((left/60)) $((left%60))
     [ "$away" -gt 0 ] && printf 'Screen is locked, %dm %ds so far\n' $((away/60)) $((away%60))
+    if [ "$d_est" = "1" ]; then
+      printf 'Roughly %dh %dm at the screen today, %d reminders (partly reconstructed)\n' \
+        $((d_screen/3600)) $((d_screen%3600/60)) "$d_breaks"
+    elif [ "$d_first" -gt 0 ]; then
+      printf 'At the screen since %s today — %dh %dm total, %d reminders\n' \
+        "$(date -r "$d_first" '+%H:%M')" $((d_screen/3600)) $((d_screen%3600/60)) "$d_breaks"
+    fi
   fi
   exit 0
 fi
 
 # ─── One tick · 每分钟一次 ──────────────────────────────────────────────
+# Load today's counters and guarantee they are written back on every exit
+# path below. 载入当天计数，并保证下面每条退出路径都会写回。
+day_load
+trap day_save EXIT
 # Is the screen locked? This is the authoritative signal — idle time is NOT,
 # because the lock screen keeps generating HID events and HIDIdleTime stays
 # near zero the whole time you are away.
@@ -197,15 +405,20 @@ elapsed=$((now - last))
 # 只要 BREAK_RESET 小于 tick 间隔，每个正常 tick 都会被当成睡眠，永远攒不起来。
 [ "$SLEEP_GAP" -lt 180 ] && SLEEP_GAP=180     # floor · 下限保护
 if [ "$elapsed" -ge "$SLEEP_GAP" ]; then
-  [ "$accum" -gt 0 ] && log "reset: tick gap ${elapsed}s (machine slept) — timer cleared"
+  if [ "$accum" -gt 0 ]; then
+    log "reset: tick gap ${elapsed}s (machine slept) — timer cleared"
+    d_rst_sleep=$((d_rst_sleep + 1))
+  fi
   printf '0 %s 0\n' "$now" > "$STATE"
   exit 0
 fi
 
 if [ "$locked" = "1" ]; then
   away=$((away + elapsed))
+  in_active_hours && d_locked=$((d_locked + elapsed))
   if [ "$away" -ge "$LOCK_RESET" ] && [ "$accum" -gt 0 ]; then
     log "reset: screen locked ${away}s — timer cleared"
+    d_rst_lock=$((d_rst_lock + 1))
     accum=0
   fi
   printf '%s %s %s\n' "$accum" "$now" "$away" > "$STATE"
@@ -220,14 +433,25 @@ fi
 
 # Away from the keyboard without locking · 没锁屏但长时间没碰
 if [ "$idle" -ge "$BREAK_RESET" ]; then
-  [ "$accum" -gt 0 ] && log "reset: idle ${idle}s — timer cleared"
+  in_active_hours && d_paused=$((d_paused + elapsed))
+  if [ "$accum" -gt 0 ]; then
+    log "reset: idle ${idle}s — timer cleared"
+    d_rst_idle=$((d_rst_idle + 1))
+  fi
   printf '0 %s 0\n' "$now" > "$STATE"
   exit 0
 fi
 
 # A short pause still counts as screen time (you are probably reading).
 # 短暂发呆仍算在看屏幕；超过 IDLE_PAUSE 就暂停累加，但不清零。
-[ "$idle" -lt "$IDLE_PAUSE" ] && accum=$((accum + elapsed))
+if [ "$idle" -lt "$IDLE_PAUSE" ]; then
+  accum=$((accum + elapsed))
+  d_screen=$((d_screen + elapsed))
+  [ "$d_first" -eq 0 ] && d_first=$now
+  d_last=$now
+else
+  in_active_hours && d_paused=$((d_paused + elapsed))
+fi
 
 if [ "$accum" -ge "$INTERVAL" ]; then
   printf '0 %s 0\n' "$now" > "$STATE"

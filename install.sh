@@ -18,6 +18,7 @@ echo "==> Installing eye-break into $BASE"
 mkdir -p "$BASE" "$HOME/Library/LaunchAgents"
 install -m 755 "$SRC/eye-break.sh" "$BASE/eye-break.sh"
 install -m 644 "$SRC/notifier.applescript" "$BASE/notifier.applescript"
+install -m 755 "$SRC/backfill.sh" "$BASE/backfill.sh"
 [ -f "$BASE/config" ] || install -m 644 "$SRC/config.example" "$BASE/config"
 [ -n "$LANG_ARG" ] && {
   /usr/bin/sed -i '' "s/^LANG_PREF=.*/LANG_PREF=$LANG_ARG/" "$BASE/config"
@@ -82,6 +83,18 @@ PLIST_EOF
 launchctl bootout "gui/$(id -u)/com.claude.eye-break" 2>/dev/null || true
 rm -f "$HOME/Library/LaunchAgents/com.claude.eye-break.plist"
 
+# Upgrading from a version without daily stats? Recover what the old log can
+# prove, so --stats is not blank on day one. This MUST happen before the agent
+# is bootstrapped: RunAtLoad fires a tick immediately, which would create
+# today's file as measured data and make the backfill skip today.
+# 从没有日统计的版本升级时，把旧日志能证明的部分捞回来。必须赶在启动 agent
+# 之前做：RunAtLoad 会立刻跑一个 tick，把今天的文件建成「已实测」，
+# 回填就会跳过今天。
+if [ -f "$BASE/eye-break.log" ] && [ -z "$(ls "$BASE/daily" 2>/dev/null)" ]; then
+  echo "==> Backfilling daily stats from the existing log · 从旧日志回填统计"
+  "$BASE/backfill.sh" | /usr/bin/sed 's/^/    /'
+fi
+
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 rm -f "$BASE/state"
@@ -89,6 +102,7 @@ rm -f "$BASE/state"
 echo
 echo "✅ Installed. · 安装完成"
 echo "   status  : $BASE/eye-break.sh --status"
+echo "   stats   : $BASE/eye-break.sh --stats [days]"
 echo "   test    : $BASE/eye-break.sh --now"
 echo "   config  : $BASE/config"
 echo "   log     : $BASE/eye-break.log"
