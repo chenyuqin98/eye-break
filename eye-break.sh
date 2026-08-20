@@ -17,6 +17,7 @@ MSG="$BASE/msg.txt"
 LOG="${EYE_BREAK_LOG:-$BASE/eye-break.log}"
 STATE="${EYE_BREAK_STATE:-$BASE/state}"
 DAILYDIR="${EYE_BREAK_DAILY:-$BASE/daily}"
+OVERLAY_BIN="$BASE/eye-break-overlay"
 
 # ─── Defaults · 默认配置 (override in ~/.eye-break/config) ───────────────
 LANG_PREF=auto        # auto | zh | en
@@ -31,6 +32,13 @@ SLEEP_GAP=300         # tick gap this big => machine slept · tick 间隔这么�
 LOCK_RESET=20         # locked this long => reset timer · 锁屏这么久就清零重来
 IDLE_PAUSE=90         # idle this long => stop adding  · 空闲这么久就暂停累加（不清零）
 BREAK_SECONDS=20      # how long to look away          · 远眺时长
+OVERLAY=1             # 1 = cover the whole screen during the break
+                      # 1 = 休息期间用全屏遮罩盖住屏幕，0 = 只发通知
+OVERLAY_OPACITY=0.94  # 0.3 (barely dimmed) .. 1.0 (solid) · 遮罩不透明度
+OVERLAY_SKIP_WHEN_PRESENTING=1
+                      # don't hijack the screen while something is holding the
+                      # display awake — screen shares, presentations, video
+                      # 有东西正撑着屏幕不休眠时不抢屏（投屏、演示、看视频）
 START_SOUND="Glass"
 END_SOUND="Ping"
 [ -f "$CONF" ] && . "$CONF"
@@ -174,27 +182,68 @@ notify() { # notify <title> <body> <sound>
   fi
 }
 
-fire() { # one full round: look away -> wait -> all clear
-  local entry idle_end
-  entry="${START_MSGS[$((RANDOM % ${#START_MSGS[@]}))]}"
-  notify "${entry%%|*}" "${entry#*|}" "$START_SOUND"
-  log "notify: start  <${entry%%|*}>"
-  sleep "$BREAK_SECONDS"
+# Is something holding the display awake? Screen sharing, Keynote in play
+# mode and video playback all assert PreventUserIdleDisplaySleep. Covering
+# the screen mid-presentation is the one failure mode worth avoiding.
+# 有没有东西正撑着屏幕不休眠？投屏、Keynote 演示、播视频都会持有
+# PreventUserIdleDisplaySleep。演示到一半被全屏遮罩盖住是最难堪的翻车。
+presenting() {
+  [ "$OVERLAY_SKIP_WHEN_PRESENTING" = "1" ] || return 1
+  /usr/bin/pmset -g assertions 2>/dev/null \
+    | /usr/bin/awk '/^ *PreventUserIdleDisplaySleep/ {print $2; exit}' \
+    | /usr/bin/grep -q '^[1-9]'
+}
 
-  # Did you actually stop? Hands-off for the whole break is the only signal
-  # available — it is a proxy, not proof, since nothing can tell where your
-  # eyes went. Still typing through the break is unambiguous though.
-  # 你到底停没停？只能用「整段没碰键鼠」当代理指标 —— 这是推断不是事实，
-  # 没有任何 API 知道你眼睛看哪儿。但「边响边打字」是确凿的没照做。
-  idle_end=${EYE_BREAK_FAKE_IDLE:-$(/usr/sbin/ioreg -c IOHIDSystem 2>/dev/null \
-             | /usr/bin/awk '/HIDIdleTime/ {print int($NF/1000000000); exit}')}
-  idle_end=${idle_end:-0}
+fire() { # one full round: look away -> wait -> all clear
+  local entry title body idle_end rc scored hands_off
+  entry="${START_MSGS[$((RANDOM % ${#START_MSGS[@]}))]}"
+  title="${entry%%|*}"; body="${entry#*|}"
+  notify "$title" "$body" "$START_SOUND"
+  log "notify: start  <$title>"
+
   d_breaks=$((d_breaks + 1))
-  if [ "$idle_end" -ge $((BREAK_SECONDS - 5)) ]; then
-    d_taken=$((d_taken + 1))
-    log "break: hands off ${idle_end}s — counted as taken"
+  scored=0
+
+  # The cover blocks for the whole break, so it replaces the sleep. Its exit
+  # code is a far better compliance signal than idle time: 0 means the break
+  # ran to the end, 2 means you pressed esc to get your screen back.
+  # 遮罩本身会阻塞整段休息，所以它取代了 sleep。它的退出码比空闲时间准得多：
+  # 0 = 整段走完，2 = 你按了 esc 把屏幕要回去。
+  if [ "$OVERLAY" = "1" ] && [ -x "$OVERLAY_BIN" ] && ! presenting; then
+    "$OVERLAY_BIN" "$title" "$body" "$BREAK_SECONDS" "$OVERLAY_OPACITY"
+    rc=$?
+    case "$rc" in
+      0) d_taken=$((d_taken + 1)); scored=1; log "break: overlay ran to the end — taken" ;;
+      2) scored=1; log "break: esc — skipped" ;;
+      *) log "break: overlay failed (rc=$rc) — falling back to a plain wait"
+         sleep "$BREAK_SECONDS" ;;
+    esac
   else
-    log "break: kept typing (idle ${idle_end}s) — not counted"
+    [ "$OVERLAY" = "1" ] && [ -x "$OVERLAY_BIN" ] && \
+      log "break: something is holding the display awake — no overlay this round"
+    sleep "$BREAK_SECONDS"
+  fi
+
+  # No overlay verdict? Fall back to the idle proxy: hands-off for the whole
+  # break. It cannot tell where your eyes went, but typing straight through
+  # the nudge is unambiguous.
+  # 没有遮罩判定时回落到空闲代理指标：整段没碰键鼠。它不知道你眼睛看哪儿，
+  # 但「提醒响了还在打字」是确凿的没照做。
+  if [ "$scored" = "0" ]; then
+    idle_end=${EYE_BREAK_FAKE_IDLE:-$(/usr/sbin/ioreg -c IOHIDSystem 2>/dev/null \
+               | /usr/bin/awk '/HIDIdleTime/ {print int($NF/1000000000); exit}')}
+    idle_end=${idle_end:-0}
+    # Floor the threshold: BREAK_SECONDS below 5 would make it negative, and
+    # every break would score as taken no matter what you did.
+    # 阈值要有下限：BREAK_SECONDS 小于 5 时它会变成负数，那样不管你干什么
+    # 每次休息都算「照做」。
+    hands_off=$((BREAK_SECONDS - 5)); [ "$hands_off" -lt 1 ] && hands_off=1
+    if [ "$idle_end" -ge "$hands_off" ]; then
+      d_taken=$((d_taken + 1))
+      log "break: hands off ${idle_end}s — counted as taken"
+    else
+      log "break: kept typing (idle ${idle_end}s) — not counted"
+    fi
   fi
 
   entry="${END_MSGS[$((RANDOM % ${#END_MSGS[@]}))]}"
@@ -293,8 +342,7 @@ stats() {
       "$((t_break / (n_days>0?n_days:1)))"
     echo
     echo '  用眼 = 计入 20 分钟配额的时间；离屏 = 锁屏 + 长时间没碰键鼠'
-    printf '  照做 = 提醒后 %d 秒内没碰过键鼠（代理指标，系统无法知道你眼睛看哪儿）\n' \
-      $((BREAK_SECONDS - 5))
+    echo '  照做 = 全屏遮罩整段走完没按 esc；没开遮罩时回落到「整段没碰键鼠」的代理指标'
     [ "$any_est" = "1" ] && echo '  * 该日部分数据由旧日志反推：用眼时间是下限，反推的提醒不计入遵守率'
   else
     printf '  %2d days      %-9s  %-7s  %-5s  %-4s  %s\n' \
@@ -305,8 +353,7 @@ stats() {
       "$((t_break / (n_days>0?n_days:1)))"
     echo
     echo '  Screen = time counted toward the 20-minute quota; Away = locked + long idle'
-    printf '  Took = no keyboard or mouse for %ds after the nudge. A proxy — nothing sees your eyes.\n' \
-      $((BREAK_SECONDS - 5))
+    echo   '  Took = the cover ran to the end without esc; without it, hands-off for the whole break'
     [ "$any_est" = "1" ] && echo '  * partly reconstructed from the old log: screen time is a lower bound,'
     [ "$any_est" = "1" ] && echo '    and reconstructed reminders are excluded from the rate'
   fi

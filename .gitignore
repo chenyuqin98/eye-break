@@ -3,3 +3,5 @@ EyeBreak.app/
 *.log
 state
 msg.txt
+eye-break-overlay
+overlay-build.log

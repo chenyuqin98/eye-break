@@ -7,8 +7,9 @@ A 20-20-20 reminder for macOS that counts **actual screen time**, not wall-clock
 > The 20-20-20 rule: every 20 minutes, look at something 20 feet (~6 m) away for 20 seconds.
 > It relaxes the ciliary muscle, which is what gets tired from sustained near focus.
 
-No Homebrew, no Electron, no menu-bar app. Two shell scripts, a 40 KB AppleScript
-notifier, and a launchd job. Everything it touches lives in `~/.eye-break`.
+No Homebrew, no Electron, no menu-bar app. A few shell scripts, a 40 KB AppleScript
+notifier, an 80 KB Swift screen cover, and a launchd job. Everything it touches
+lives in `~/.eye-break`.
 
 ## Why not just a 20-minute timer?
 
@@ -32,6 +33,43 @@ Lock state is read from `IOConsoleLocked` in the IORegistry, **not** inferred fr
 idle time. This matters: while the screen is locked, `HIDIdleTime` keeps getting
 reset by the lock screen itself and sits near zero the entire time you are away,
 so any idle-based heuristic silently believes you never left.
+
+## The break itself
+
+A notification is easy to miss, and trivially easy to ignore once you have seen a
+few hundred of them. So the break is a cover over the whole screen:
+
+```
+┌────────────────────────────────────────────────┐
+│                                                │
+│              👀  Look 20 feet away             │
+│                                                │
+│                    17                          │
+│              ●●●●●●●●●●●○○○○○○○○○              │
+│                                                │
+│      Your ciliary muscle has been clenched     │
+│              for 20 minutes                    │
+│                                                │
+│                esc to skip                     │
+│                                                │
+└────────────────────────────────────────────────┘
+```
+
+It sits above the menu bar and above full-screen apps, on every display, and
+swallows keystrokes so you cannot keep typing underneath it. After
+`BREAK_SECONDS` it disappears on its own.
+
+Two things make it liveable:
+
+- **`esc` skips it.** The skip is recorded, so the compliance number stays honest.
+- **It stands down while you are presenting.** Screen sharing, Keynote in play
+  mode and video playback all assert `PreventUserIdleDisplaySleep`; when
+  something holds that, you get the notification and no cover. Being blacked out
+  mid-presentation is the one failure worth engineering around. The trade-off:
+  no cover while you watch video either. Set `OVERLAY_SKIP_WHEN_PRESENTING=0`
+  if you would rather have it anyway.
+
+Set `OVERLAY=0` for notifications only.
 
 ## Install
 
@@ -76,14 +114,15 @@ alerts stay on screen until dismissed, which is much harder to ignore.
 | **Screen** | time that counted toward the 20-minute quota — the headline number |
 | **Away** | locked + long idle, counted only inside your active hours |
 | **Fired** | reminders delivered |
-| **Took** | ...of which you went hands-off for the whole break |
+| **Took** | ...of which the cover ran to the end without `esc` |
 | **Rate** | Took / Fired |
 | **Cut** | how many times the timer was reset (locked, idle, or slept) |
 
-**"Took" is a proxy, not proof.** No API can see where your eyes are pointing, so
-the only thing measurable is whether you stopped touching the keyboard and mouse
-for the full break. Sitting still and staring at the same screen scores as a pass;
-typing straight through the nudge scores as a fail, and that part is unambiguous.
+**How "Took" is measured.** With the cover on, it is the cover's own exit code:
+it ran to the end, or you pressed `esc`. That is a real signal, not a guess.
+With `OVERLAY=0` it falls back to a proxy — no keyboard or mouse for the whole
+break — which cannot see where your eyes are pointing, so sitting still and
+staring at the same screen scores as a pass.
 
 One `key=value` file per day under `~/.eye-break/daily/`, rewritten every tick, so
 a crash costs at most one minute. Upgrading from a version without stats? `install.sh`
@@ -105,6 +144,9 @@ Edit `~/.eye-break/config` — changes take effect on the next tick, no reload n
 | `LOCK_RESET` | `20` | screen locked this long → reset the timer |
 | `IDLE_PAUSE` | `90` | idle this long → pause accumulating |
 | `BREAK_SECONDS` | `20` | how long to look away |
+| `OVERLAY` | `1` | `1` = cover the whole screen during the break, `0` = notification only |
+| `OVERLAY_OPACITY` | `0.94` | `0.3` (barely dimmed) … `1.0` (solid) |
+| `OVERLAY_SKIP_WHEN_PRESENTING` | `1` | stand down while something holds the display awake |
 | `START_SOUND` / `END_SOUND` | `Glass` / `Ping` | any name from `/System/Library/Sounds` |
 
 Each reminder is drawn at random from a pool of 14 opening lines and 8 closing
@@ -125,10 +167,10 @@ launchd (every 60s)  ->  eye-break.sh  ->  reads HIDIdleTime from ioreg
                               +-- idle >= 90s ......... pause, exit
                               +-- otherwise ........... accumulate elapsed
                               |
-                              +-- accumulated >= 1200s  -> notify, sleep 20s,
-                                                           re-read idle to score
-                                                           the break, notify,
-                                                           reset state
+                              +-- accumulated >= 1200s  -> notify, cover the
+                                                           screen 20s, score the
+                                                           break from its exit
+                                                           code, notify, reset
 ```
 
 State is three integers in `~/.eye-break/state`: accumulated screen seconds, the
@@ -148,8 +190,13 @@ then `open -n`s the app, which reads the file and posts the notification.
   test against `/bin/bash` specifically, not your Homebrew bash.
 - Editing an applet's `Info.plist` invalidates its code signature and it will
   silently refuse to launch. `install.sh` re-signs ad-hoc afterwards.
-- Do Not Disturb / Focus will suppress the notification. That's usually what you
-  want — it means no reminders mid-meeting.
+- Do Not Disturb / Focus will suppress the notification — silently, and there is
+  no way to detect it: `pmset -g assertions` does not report DND, the
+  `com.apple.ncprefs` domain is unreadable, and `~/Library/DoNotDisturb/DB/` is
+  blocked by TCC. So "it stopped reminding me" has two very different causes, and
+  the log is what tells them apart: a `notify: start` line means it fired and
+  delivery was suppressed; no line means the timer never got there. The screen
+  cover is not affected by Focus.
 - `bash` 3.2 is not multibyte-aware when parsing variable names: `out="$out█"`
   swallows the first UTF-8 byte into the name and dies under `set -u`. Braces are
   mandatory — `out="${out}█"`.
@@ -159,6 +206,8 @@ then `open -n`s the app, which reads the file and posts the notification.
 - A Mac left locked but awake keeps ticking all night, so away-time is only
   counted inside `ACTIVE_START`–`ACTIVE_END`. Otherwise a four-hour workday
   reports thirteen hours "away".
+- The cover needs the Command Line Tools (`xcode-select --install`) to compile.
+  Without them `install.sh` says so and carries on notification-only.
 - Testing hooks: `EYE_BREAK_FAKE_LOCKED`, `EYE_BREAK_FAKE_IDLE`, `EYE_BREAK_LOG`,
   `EYE_BREAK_STATE`, `EYE_BREAK_DAILY` let you
   drive the state machine without touching real data or waiting 20 minutes.

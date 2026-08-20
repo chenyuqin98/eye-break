@@ -43,3 +43,18 @@ BREAK_SECONDS=20
 # Sounds · 音效 (any name from /System/Library/Sounds)
 START_SOUND=Glass
 END_SOUND=Ping
+
+# Full-screen cover during the break · 休息期间的全屏遮罩
+# 1 = cover the whole screen, 0 = notification only
+# 遮罩会盖住整个屏幕，按 esc 可以跳过；它整段走完才算「照做」
+OVERLAY=1
+
+# 0.3 (barely dimmed) .. 1.0 (solid black) · 遮罩不透明度
+OVERLAY_OPACITY=0.94
+
+# Skip the cover while something is holding the display awake — screen shares,
+# Keynote in play mode, video playback. Getting covered mid-presentation is
+# the one failure mode worth avoiding.
+# 有东西正撑着屏幕不休眠时不抢屏（投屏、演示、看视频）。演示到一半被遮罩
+# 盖住是最难堪的翻车。注意：看视频时也会因此不遮罩。
+OVERLAY_SKIP_WHEN_PRESENTING=1

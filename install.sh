@@ -25,6 +25,24 @@ install -m 755 "$SRC/backfill.sh" "$BASE/backfill.sh"
   echo "    language pinned to '$LANG_ARG' in $BASE/config"
 }
 
+# The full-screen cover is a tiny Swift program. It needs the Command Line
+# Tools; without them eye-break still works, just notification-only.
+# 全屏遮罩是个很小的 Swift 程序，要 Command Line Tools。没装也不影响使用，
+# 只是回落成纯通知。
+if command -v swiftc >/dev/null 2>&1; then
+  echo "==> Building the full-screen cover · 编译全屏遮罩"
+  if swiftc -O -o "$BASE/eye-break-overlay" "$SRC/overlay.swift" 2>"$BASE/overlay-build.log"; then
+    chmod 755 "$BASE/eye-break-overlay"
+    rm -f "$BASE/overlay-build.log"
+  else
+    echo "    build failed — see $BASE/overlay-build.log; falling back to notifications only"
+    rm -f "$BASE/eye-break-overlay"
+  fi
+else
+  echo "==> No swiftc, skipping the full-screen cover · 没有 swiftc，跳过全屏遮罩"
+  echo "    install it with: xcode-select --install"
+fi
+
 # Resolve display name for the notifier app · 通知器 App 的显示名
 LP="$LANG_ARG"
 [ -z "$LP" ] && LP=$(/usr/bin/awk -F= '/^LANG_PREF=/{print $2}' "$BASE/config" 2>/dev/null || echo auto)
@@ -104,6 +122,7 @@ echo "✅ Installed. · 安装完成"
 echo "   status  : $BASE/eye-break.sh --status"
 echo "   stats   : $BASE/eye-break.sh --stats [days]"
 echo "   test    : $BASE/eye-break.sh --now"
+[ -x "$BASE/eye-break-overlay" ] && echo "   cover   : on — set OVERLAY=0 in the config to turn it off"
 echo "   config  : $BASE/config"
 echo "   log     : $BASE/eye-break.log"
 echo "   uninstall: $SRC/uninstall.sh"
